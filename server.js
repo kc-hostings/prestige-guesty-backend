@@ -7,40 +7,6 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-app.get("/api/test-connection", async (req, res) => {
-  try {
-    const response = await fetch("https://booking.guesty.com");
-    res.json({ ok: true, status: response.status });
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/api/test-booking-api", async (_req, res) => {
-  try {
-    const response = await fetch("https://booking-api.guesty.com/v1/search");
-    res.json({
-      ok: true,
-      status: response.status,
-      statusText: response.statusText
-    });
-  } catch (e) {
-    console.error("TEST BOOKING API ERROR:", e);
-    console.error("TEST BOOKING API CAUSE:", e?.cause);
-
-    res.json({
-      ok: false,
-      error: e?.message || null,
-      name: e?.name || null,
-      causeMessage: e?.cause?.message || null,
-      causeCode: e?.cause?.code || null,
-      causeErrno: e?.cause?.errno || null,
-      causeAddress: e?.cause?.address || null,
-      causePort: e?.cause?.port || null
-    });
-  }
-});
-
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "*";
 app.use(
   cors({
@@ -49,11 +15,13 @@ app.use(
   })
 );
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 10000);
 
-// Booking Engine API
+// Guesty Booking Engine
 const TOKEN_URL = "https://booking.guesty.com/oauth2/token";
-const SEARCH_URL = "https://booking-api.guesty.com/v1/search";
+const API_BASE_URL = "https://booking.guesty.com/api";
+const LISTINGS_URL = `${API_BASE_URL}/listings`;
+const CITIES_URL = `${LISTINGS_URL}/cities`;
 
 const LISTING_IDS = {
   multi: {
@@ -87,12 +55,17 @@ function requireEnv(name) {
   return value;
 }
 
-function safeDate(input) {
-  console.log("safeDate input:", input);
-  if (!input || !/^\d{4}-\d{2}-\d{2}$/.test(input)) {
-    throw new Error("Invalid date. Use YYYY-MM-DD.");
-  }
-  return input;
+function getAllListingIds() {
+  return [
+    ...Object.values(LISTING_IDS.multi).filter(Boolean),
+    ...Object.values(LISTING_IDS.units).filter(Boolean),
+  ];
+}
+
+function findListingIdByKey(key) {
+  if (LISTING_IDS.multi[key]) return LISTING_IDS.multi[key];
+  if (LISTING_IDS.units[key]) return LISTING_IDS.units[key];
+  return null;
 }
 
 async function getAccessToken() {
@@ -129,6 +102,10 @@ async function getAccessToken() {
 
   const data = await response.json();
 
+  if (!data?.access_token) {
+    throw new Error("Guesty token response did not contain an access_token.");
+  }
+
   tokenCache.value = data.access_token;
   tokenCache.expiresAt = now + (data.expires_in || 3600) * 1000;
 
@@ -146,13 +123,68 @@ async function guestyFetch(url) {
     },
   });
 
+  const text = await response.text();
+
   if (!response.ok) {
-    const text = await response.text();
     throw new Error(`Guesty request failed: ${response.status} ${text}`);
   }
 
-  return response.json();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ok: true, raw: text };
+  }
 }
+
+// ---------------------------------------------------
+// TEST ROUTES
+// ---------------------------------------------------
+
+app.get("/api/test-connection", async (_req, res) => {
+  try {
+    const response = await fetch("https://booking.guesty.com");
+    res.json({ ok: true, status: response.status });
+  } catch (e) {
+    res.json({ ok: false, error: e?.message || "Unknown error" });
+  }
+});
+
+app.get("/api/test-token", async (_req, res) => {
+  try {
+    const token = await getAccessToken();
+    res.json({
+      ok: true,
+      tokenReceived: Boolean(token),
+      tokenPreview: `${token.slice(0, 12)}...`,
+    });
+  } catch (e) {
+    res.status(400).json({
+      ok: false,
+      error: e?.message || "Unknown error",
+    });
+  }
+});
+
+app.get("/api/test-listings-api", async (_req, res) => {
+  try {
+    const data = await guestyFetch(LISTINGS_URL);
+    res.json({
+      ok: true,
+      received: Array.isArray(data) ? data.length : null,
+      data,
+    });
+  } catch (e) {
+    res.status(400).json({
+      ok: false,
+      error: e?.message || null,
+      name: e?.name || null,
+    });
+  }
+});
+
+// ---------------------------------------------------
+// BASIC ROUTES
+// ---------------------------------------------------
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -163,32 +195,20 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.get("/api/listing-ids", (_req, res) => {
-  res.json(LISTING_IDS);
+  res.json({
+    ok: true,
+    listingIds: LISTING_IDS,
+    allListingIds: getAllListingIds(),
+  });
 });
 
-app.get("/api/search", async (req, res) => {
+// ---------------------------------------------------
+// GUESTY DATA ROUTES
+// ---------------------------------------------------
+
+app.get("/api/cities", async (_req, res) => {
   try {
-    console.log("query:", req.query);
-
-    const checkIn = safeDate(req.query.checkIn);
-    const checkOut = safeDate(req.query.checkOut);
-
-    const params = new URLSearchParams({
-      checkIn,
-      checkOut,
-    });
-
-    if (req.query.adults) {
-      params.set("adults", String(req.query.adults));
-    }
-
-    if (req.query.location) {
-      params.set("location", String(req.query.location));
-    }
-
-    const url = `${SEARCH_URL}?${params.toString()}`;
-    const data = await guestyFetch(url);
-
+    const data = await guestyFetch(CITIES_URL);
     res.json(data);
   } catch (error) {
     res.status(400).json({
@@ -198,47 +218,57 @@ app.get("/api/search", async (req, res) => {
   }
 });
 
-app.get("/api/check-category/:listingId", async (req, res) => {
+app.get("/api/listings", async (_req, res) => {
   try {
-    console.log("query:", req.query);
+    const data = await guestyFetch(LISTINGS_URL);
+    res.json(data);
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
 
+app.get("/api/listings/:listingId", async (req, res) => {
+  try {
     const listingId = req.params.listingId;
-    const checkIn = safeDate(req.query.checkIn);
-    const checkOut = safeDate(req.query.checkOut);
-
-    const params = new URLSearchParams({
-      checkIn,
-      checkOut,
-    });
-
-    if (req.query.adults) {
-      params.set("adults", String(req.query.adults));
-    }
-
-    if (req.query.location) {
-      params.set("location", String(req.query.location));
-    }
-
-    const url = `${SEARCH_URL}?${params.toString()}`;
+    const url = `${LISTINGS_URL}/${listingId}`;
     const data = await guestyFetch(url);
-
-    const items = Array.isArray(data?.results)
-      ? data.results
-      : Array.isArray(data)
-      ? data
-      : [];
-
-    const match = items.find((item) => {
-      const id = item?._id || item?.id || item?.listingId;
-      return id === listingId;
+    res.json(data);
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
     });
+  }
+});
+
+// Kategorie-Key -> Listing laden
+// Beispiele:
+// /api/category/deluxe
+// /api/category/standard
+// /api/category/superior7
+app.get("/api/category/:key", async (req, res) => {
+  try {
+    const key = req.params.key;
+    const listingId = findListingIdByKey(key);
+
+    if (!listingId) {
+      return res.status(404).json({
+        ok: false,
+        error: `Unknown category/listing key: ${key}`,
+      });
+    }
+
+    const url = `${LISTINGS_URL}/${listingId}`;
+    const data = await guestyFetch(url);
 
     res.json({
       ok: true,
+      key,
       listingId,
-      found: Boolean(match),
-      match: match || null,
-      rawCount: items.length,
+      data,
     });
   } catch (error) {
     res.status(400).json({
@@ -248,6 +278,81 @@ app.get("/api/check-category/:listingId", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Guesty backend listening on http://localhost:${PORT}`);
+// Alle bekannten Prestige-Listings laden
+app.get("/api/prestige-listings", async (_req, res) => {
+  try {
+    const entries = [];
+
+    for (const [key, listingId] of Object.entries(LISTING_IDS.multi)) {
+      if (!listingId) continue;
+
+      try {
+        const data = await guestyFetch(`${LISTINGS_URL}/${listingId}`);
+        entries.push({
+          ok: true,
+          type: "multi",
+          key,
+          listingId,
+          data,
+        });
+      } catch (e) {
+        entries.push({
+          ok: false,
+          type: "multi",
+          key,
+          listingId,
+          error: e.message,
+        });
+      }
+    }
+
+    for (const [key, listingId] of Object.entries(LISTING_IDS.units)) {
+      if (!listingId) continue;
+
+      try {
+        const data = await guestyFetch(`${LISTINGS_URL}/${listingId}`);
+        entries.push({
+          ok: true,
+          type: "unit",
+          key,
+          listingId,
+          data,
+        });
+      } catch (e) {
+        entries.push({
+          ok: false,
+          type: "unit",
+          key,
+          listingId,
+          error: e.message,
+        });
+      }
+    }
+
+    res.json({
+      ok: true,
+      count: entries.length,
+      entries,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// ---------------------------------------------------
+// FALLBACK
+// ---------------------------------------------------
+
+app.use((_req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: "Route not found",
+  });
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Guesty backend listening on http://0.0.0.0:${PORT}`);
 });
