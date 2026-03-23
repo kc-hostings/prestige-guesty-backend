@@ -53,7 +53,7 @@ const PORT = Number(process.env.PORT || 3000);
 
 // Booking Engine API
 const TOKEN_URL = "https://booking.guesty.com/oauth2/token";
-const SEARCH_URL = "https://booking.guesty.com/api/v1/search";
+const SEARCH_URL = "https://booking.guesty.com/api/search";
 
 const LISTING_IDS = {
   multi: {
