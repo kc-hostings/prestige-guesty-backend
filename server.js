@@ -128,6 +128,10 @@ function buildUrl(base, query = {}) {
   return url.toString();
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -151,10 +155,10 @@ function inferCategoryKeyFromListing(listing) {
 
   const title = normalizeText(
     listing?.title ||
-    listing?.name ||
-    listing?.nickname ||
-    listing?.publicDescription?.summary ||
-    ""
+      listing?.name ||
+      listing?.nickname ||
+      listing?.publicDescription?.summary ||
+      ""
   );
 
   if (title.includes("standard")) return "standard";
@@ -224,9 +228,10 @@ function normalizeListing(listing, sourceType = null, requestedKey = null) {
     bathrooms: listing?.bathrooms ?? null,
     categoryKey: categoryKey || null,
     categoryTitle: categoryMeta?.title || null,
-    bookingUrl: BOOKING_BASE_URL && id
-      ? `${BOOKING_BASE_URL.replace(/\/$/, "")}/${id}`
-      : null,
+    bookingUrl:
+      BOOKING_BASE_URL && id
+        ? `${BOOKING_BASE_URL.replace(/\/$/, "")}/${id}`
+        : null,
     sourceType,
     raw: listing,
   };
@@ -260,52 +265,6 @@ function uniqueByCategory(listings) {
   return result;
 }
 
-async function getAvailableUnits({ checkin, checkout, occupancy, requestedCategory }) {
-  const liveResults = [];
-
-  for (const [unitKey, listingId] of Object.entries(LISTING_IDS.units)) {
-    if (!listingId) continue;
-
-    const categoryKey = mapUnitKeyToCategory(unitKey);
-    if (!categoryKey) continue;
-
-    const categoryMeta = CATEGORY_META[categoryKey];
-    if (!categoryMeta) continue;
-
-    if (requestedCategory && categoryKey !== requestedCategory) continue;
-    if (occupancy > categoryMeta.capacityMax) continue;
-
-    const result = await guestyFetchSafe(
-      buildUrl(LISTINGS_URL, {
-        available: "true",
-        checkin,
-        checkout,
-        minOccupancy: occupancy,
-        listingId,
-      })
-    );
-
-    if (!result.ok) continue;
-
-    const items = parseArrayResponse(result.data);
-    if (!items.length) continue;
-
-    const normalized = normalizeListing(
-      items[0],
-      "unit-availability",
-      categoryKey
-    );
-
-    liveResults.push({
-      ...normalized,
-      unitKey,
-      listingId,
-    });
-  }
-
-  return liveResults;
-}
-
 // ---------------------------------------------------
 // TOKEN / FETCH
 // ---------------------------------------------------
@@ -313,7 +272,7 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
 async function getAccessToken() {
   const now = Date.now();
 
-  if (tokenCache.value && tokenCache.expiresAt > now + 60000) {
+  if (tokenCache.value && tokenCache.expiresAt > now + 60_000) {
     return tokenCache.value;
   }
 
@@ -325,31 +284,53 @@ async function getAccessToken() {
     const clientId = requireEnv("GUESTY_CLIENT_ID");
     const clientSecret = requireEnv("GUESTY_CLIENT_SECRET");
 
-    const body = new URLSearchParams({
-      grant_type: "client_credentials",
-      scope: "booking_engine:api",
-      client_id: clientId,
-      client_secret: clientSecret,
-    });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const body = new URLSearchParams({
+        grant_type: "client_credentials",
+        scope: "booking_engine:api",
+        client_id: clientId,
+        client_secret: clientSecret,
+      });
 
-    const response = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body,
-    });
+      const response = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/x-www-form-urlencoded",
+          "cache-control": "no-cache,no-cache",
+        },
+        body,
+      });
 
-    const data = await response.json();
+      const text = await response.text();
 
-    if (!data.access_token) {
-      throw new Error("No access token received");
+      if (response.ok) {
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error("Guesty token response was not valid JSON.");
+        }
+
+        if (!data?.access_token) {
+          throw new Error("Guesty token response did not contain an access_token.");
+        }
+
+        tokenCache.value = data.access_token;
+        tokenCache.expiresAt = Date.now() + (data.expires_in || 3600) * 1000;
+
+        return tokenCache.value;
+      }
+
+      if (response.status === 429 && attempt < 3) {
+        await sleep(attempt * 2000);
+        continue;
+      }
+
+      throw new Error(`Guesty token request failed: ${response.status} ${text}`);
     }
 
-    tokenCache.value = data.access_token;
-    tokenCache.expiresAt = Date.now() + (data.expires_in || 3600) * 1000;
-
-    return tokenCache.value;
+    throw new Error("Guesty token request failed after retries.");
   })();
 
   try {
@@ -393,6 +374,60 @@ async function guestyFetchSafe(url) {
       error: error?.message || "Unknown Guesty error",
     };
   }
+}
+
+// ---------------------------------------------------
+// AVAILABILITY HELPERS
+// ---------------------------------------------------
+
+async function getAvailableUnits({ checkin, checkout, occupancy, requestedCategory }) {
+  const liveResults = [];
+
+  for (const [unitKey, listingId] of Object.entries(LISTING_IDS.units)) {
+    if (!listingId) continue;
+
+    const categoryKey = mapUnitKeyToCategory(unitKey);
+    if (!categoryKey) continue;
+
+    const categoryMeta = CATEGORY_META[categoryKey];
+    if (!categoryMeta) continue;
+
+    if (requestedCategory && categoryKey !== requestedCategory) continue;
+    if (occupancy > categoryMeta.capacityMax) continue;
+
+    const url = buildUrl(LISTINGS_URL, {
+      available: "true",
+      checkin,
+      checkout,
+      minOccupancy: occupancy,
+      listingId,
+    });
+
+    const result = await guestyFetchSafe(url);
+
+    if (!result.ok) {
+      console.log(`[availability] ${unitKey} (${listingId}) failed: ${result.error}`);
+      continue;
+    }
+
+    const items = parseArrayResponse(result.data);
+
+    console.log(
+      `[availability] ${unitKey} (${listingId}) -> ${items.length} result(s)`
+    );
+
+    if (!items.length) continue;
+
+    const normalized = normalizeListing(items[0], "unit-availability", categoryKey);
+
+    liveResults.push({
+      ...normalized,
+      unitKey,
+      listingId,
+    });
+  }
+
+  return liveResults;
 }
 
 // ---------------------------------------------------
@@ -545,6 +580,7 @@ app.get("/api/listings", async (req, res) => {
   try {
     const url = buildUrl(LISTINGS_URL, req.query);
     const data = await guestyFetch(url);
+
     res.json({
       ok: true,
       count: parseArrayResponse(data).length,
@@ -562,6 +598,7 @@ app.get("/api/listings/:listingId", async (req, res) => {
   try {
     const listingId = req.params.listingId;
     const data = await guestyFetch(`${LISTINGS_URL}/${listingId}`);
+
     res.json({
       ok: true,
       listingId,
@@ -669,8 +706,8 @@ app.get("/api/prestige-listings", async (_req, res) => {
     res.json({
       ok: true,
       count: entries.length,
-      successCount: entries.filter(item => item.ok).length,
-      errorCount: entries.filter(item => !item.ok).length,
+      successCount: entries.filter((item) => item.ok).length,
+      errorCount: entries.filter((item) => !item.ok).length,
       entries,
     });
   } catch (error) {
