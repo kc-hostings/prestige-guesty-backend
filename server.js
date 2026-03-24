@@ -16,6 +16,7 @@ app.use(
 );
 
 const PORT = Number(process.env.PORT || 10000);
+const APP_VERSION = process.env.APP_VERSION || "local-dev";
 
 // ---------------------------------------------------
 // GUESTY CONFIG
@@ -78,6 +79,8 @@ let tokenCache = {
   value: null,
   expiresAt: 0,
 };
+
+let tokenPromise = null;
 
 // ---------------------------------------------------
 // HELPERS
@@ -314,6 +317,77 @@ async function getAccessToken() {
     return tokenCache.value;
   }
 
+  if (tokenPromise) {
+    return tokenPromise;
+  }
+
+  tokenPromise = (async () => {
+    const clientId = requireEnv("GUESTY_CLIENT_ID");
+    const clientSecret = requireEnv("GUESTY_CLIENT_SECRET");
+
+    const body = new URLSearchParams({
+      grant_type: "client_credentials",
+      scope: "booking_engine:api",
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
+
+    let response;
+    let text;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      response = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/x-www-form-urlencoded",
+          "cache-control": "no-cache,no-cache",
+        },
+        body,
+      });
+
+      text = await response.text();
+
+      if (response.ok) break;
+
+      if (response.status === 429 && attempt < 3) {
+        const waitMs = attempt * 2000;
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
+      }
+
+      throw new Error(`Guesty token request failed: ${response.status} ${text}`);
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error("Guesty token response was not valid JSON.");
+    }
+
+    if (!data?.access_token) {
+      throw new Error("Guesty token response did not contain an access_token.");
+    }
+
+    tokenCache.value = data.access_token;
+    tokenCache.expiresAt = Date.now() + (data.expires_in || 3600) * 1000;
+
+    return tokenCache.value;
+  })();
+
+  try {
+    return await tokenPromise;
+  } finally {
+    tokenPromise = null;
+  }
+}
+  const now = Date.now();
+
+  if (tokenCache.value && tokenCache.expiresAt > now + 60_000) {
+    return tokenCache.value;
+  }
+
   const clientId = requireEnv("GUESTY_CLIENT_ID");
   const clientSecret = requireEnv("GUESTY_CLIENT_SECRET");
 
@@ -394,6 +468,67 @@ async function guestyFetchSafe(url) {
 }
 
 // ---------------------------------------------------
+// REQUEST LOGGER
+// ---------------------------------------------------
+
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+// ---------------------------------------------------
+// DEBUG ROUTES
+// ---------------------------------------------------
+
+app.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "prestige-apartments-guesty-backend",
+    version: APP_VERSION,
+    routes: [
+      "/",
+      "/api/health",
+      "/api/routes",
+      "/api/test-connection",
+      "/api/test-token",
+      "/api/test-listings-api",
+      "/api/listing-ids",
+      "/api/cities",
+      "/api/listings",
+      "/api/listings/:listingId",
+      "/api/category/:key",
+      "/api/prestige-listings",
+      "/api/availability",
+      "/api/availability-search",
+      "/api/category-suggestions",
+    ],
+  });
+});
+
+app.get("/api/routes", (_req, res) => {
+  res.json({
+    ok: true,
+    version: APP_VERSION,
+    routes: [
+      "/api/health",
+      "/api/routes",
+      "/api/test-connection",
+      "/api/test-token",
+      "/api/test-listings-api",
+      "/api/listing-ids",
+      "/api/cities",
+      "/api/listings",
+      "/api/listings/:listingId",
+      "/api/category/:key",
+      "/api/prestige-listings",
+      "/api/availability",
+      "/api/availability-search",
+      "/api/category-suggestions",
+    ],
+  });
+});
+
+// ---------------------------------------------------
 // TEST ROUTES
 // ---------------------------------------------------
 
@@ -447,6 +582,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     service: "prestige-apartments-guesty-backend",
+    version: APP_VERSION,
     frontendOrigin: FRONTEND_ORIGIN,
     bookingBaseUrlConfigured: Boolean(BOOKING_BASE_URL),
     listingIdsLoaded: LISTING_IDS,
@@ -677,69 +813,23 @@ async function handleAvailabilityRequest(req, res) {
 
 app.get("/api/availability", handleAvailabilityRequest);
 app.get("/api/availability-search", handleAvailabilityRequest);
-
-// ---------------------------------------------------
-// CATEGORY SUGGESTIONS
-// ---------------------------------------------------
-
-app.get("/api/category-suggestions", async (req, res) => {
-  try {
-    const { checkin, checkout, guests, category, location } = req.query;
-
-    if (!checkin || !checkout) {
-      return res.status(400).json({
-        ok: false,
-        error: "checkin and checkout are required",
-      });
-    }
-
-    const requestedGuests = Number(guests || 1);
-    const occupancy =
-      Number.isFinite(requestedGuests) && requestedGuests > 0
-        ? requestedGuests
-        : 1;
-
-    const requestedCategory = category ? String(category).toLowerCase() : "";
-
-    const liveResults = await getAvailableUnits({
-      checkin,
-      checkout,
-      occupancy,
-      requestedCategory,
-    });
-
-    const finalResults = uniqueByCategory(liveResults).sort(sortByCategory);
-
-    res.json({
-      ok: true,
-      mode: "unit-availability",
-      location: location || "reutlingen",
-      checkin,
-      checkout,
-      guests: occupancy,
-      category: requestedCategory || null,
-      count: finalResults.length,
-      results: finalResults,
-    });
-  } catch (error) {
-    res.status(400).json({
-      ok: false,
-      error: error.message,
-    });
-  }
-});
+app.get("/api/category-suggestions", handleAvailabilityRequest);
 
 // ---------------------------------------------------
 // FALLBACK
 // ---------------------------------------------------
 
-app.use((_req, res) => {
+app.use((req, res) => {
   res.status(404).json({
     ok: false,
     error: "Route not found",
+    method: req.method,
+    path: req.originalUrl,
+    version: APP_VERSION,
   });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Guesty backend listening on http://0.0.0.0:${PORT}`);
+  console.log(`APP_VERSION=${APP_VERSION}`);
 });
