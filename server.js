@@ -313,7 +313,7 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
 async function getAccessToken() {
   const now = Date.now();
 
-  if (tokenCache.value && tokenCache.expiresAt > now + 60_000) {
+  if (tokenCache.value && tokenCache.expiresAt > now + 60000) {
     return tokenCache.value;
   }
 
@@ -332,42 +332,18 @@ async function getAccessToken() {
       client_secret: clientSecret,
     });
 
-    let response;
-    let text;
+    const response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      response = await fetch(TOKEN_URL, {
-        method: "POST",
-        headers: {
-          accept: "application/json",
-          "content-type": "application/x-www-form-urlencoded",
-          "cache-control": "no-cache,no-cache",
-        },
-        body,
-      });
+    const data = await response.json();
 
-      text = await response.text();
-
-      if (response.ok) break;
-
-      if (response.status === 429 && attempt < 3) {
-        const waitMs = attempt * 2000;
-        await new Promise(resolve => setTimeout(resolve, waitMs));
-        continue;
-      }
-
-      throw new Error(`Guesty token request failed: ${response.status} ${text}`);
-    }
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error("Guesty token response was not valid JSON.");
-    }
-
-    if (!data?.access_token) {
-      throw new Error("Guesty token response did not contain an access_token.");
+    if (!data.access_token) {
+      throw new Error("No access token received");
     }
 
     tokenCache.value = data.access_token;
@@ -381,54 +357,6 @@ async function getAccessToken() {
   } finally {
     tokenPromise = null;
   }
-}
-  const now = Date.now();
-
-  if (tokenCache.value && tokenCache.expiresAt > now + 60_000) {
-    return tokenCache.value;
-  }
-
-  const clientId = requireEnv("GUESTY_CLIENT_ID");
-  const clientSecret = requireEnv("GUESTY_CLIENT_SECRET");
-
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    scope: "booking_engine:api",
-    client_id: clientId,
-    client_secret: clientSecret,
-  });
-
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/x-www-form-urlencoded",
-      "cache-control": "no-cache,no-cache",
-    },
-    body,
-  });
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`Guesty token request failed: ${response.status} ${text}`);
-  }
-
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error("Guesty token response was not valid JSON.");
-  }
-
-  if (!data?.access_token) {
-    throw new Error("Guesty token response did not contain an access_token.");
-  }
-
-  tokenCache.value = data.access_token;
-  tokenCache.expiresAt = now + (data.expires_in || 3600) * 1000;
-
-  return tokenCache.value;
 }
 
 async function guestyFetch(url) {
