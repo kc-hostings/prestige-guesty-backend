@@ -94,11 +94,15 @@ function requireEnv(name) {
   return value;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function getAllListingIds() {
   return [
     ...Object.values(LISTING_IDS.multi).filter(Boolean),
     ...Object.values(LISTING_IDS.units).filter(Boolean),
-  ];
+  ].map(String);
 }
 
 function findListingIdByKey(key) {
@@ -128,10 +132,6 @@ function buildUrl(base, query = {}) {
   return url.toString();
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -147,10 +147,10 @@ function normalizeText(value) {
 function inferCategoryKeyFromListing(listing) {
   const rawId = String(listing?._id || listing?.id || listing?.listingId || "");
 
-  const matchMulti = Object.entries(LISTING_IDS.multi).find(([, listingId]) => listingId === rawId);
+  const matchMulti = Object.entries(LISTING_IDS.multi).find(([, listingId]) => String(listingId) === rawId);
   if (matchMulti) return matchMulti[0];
 
-  const matchUnit = Object.entries(LISTING_IDS.units).find(([, listingId]) => listingId === rawId);
+  const matchUnit = Object.entries(LISTING_IDS.units).find(([, listingId]) => String(listingId) === rawId);
   if (matchUnit) return mapUnitKeyToCategory(matchUnit[0]);
 
   const title = normalizeText(
@@ -272,10 +272,12 @@ function uniqueByCategory(listings) {
 async function getAccessToken() {
   const now = Date.now();
 
+  // Token 50 Minuten wiederverwenden
   if (tokenCache.value && tokenCache.expiresAt > now) {
     return tokenCache.value;
   }
 
+  // parallele Token-Requests verhindern
   if (tokenPromise) {
     return tokenPromise;
   }
@@ -284,31 +286,54 @@ async function getAccessToken() {
     const clientId = requireEnv("GUESTY_CLIENT_ID");
     const clientSecret = requireEnv("GUESTY_CLIENT_SECRET");
 
-    const body = new URLSearchParams({
-      grant_type: "client_credentials",
-      scope: "booking_engine:api",
-      client_id: clientId,
-      client_secret: clientSecret,
-    });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const body = new URLSearchParams({
+        grant_type: "client_credentials",
+        scope: "booking_engine:api",
+        client_id: clientId,
+        client_secret: clientSecret,
+      });
 
-    const response = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body,
-    });
+      const response = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/x-www-form-urlencoded",
+          "cache-control": "no-cache,no-cache",
+        },
+        body,
+      });
 
-    const data = await response.json();
+      const text = await response.text();
 
-    if (!data?.access_token) {
-      throw new Error(`No access token received: ${JSON.stringify(data)}`);
+      let data = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+
+      if (response.ok && data?.access_token) {
+        tokenCache.value = data.access_token;
+
+        // konservativ cachen, damit nicht dauernd neu geholt wird
+        const expiresInMs = Math.max(((data.expires_in || 3600) - 300) * 1000, 10 * 60 * 1000);
+        tokenCache.expiresAt = Date.now() + expiresInMs;
+
+        return tokenCache.value;
+      }
+
+      if (response.status === 429 && attempt < 3) {
+        await sleep(attempt * 3000);
+        continue;
+      }
+
+      throw new Error(
+        `No access token received: ${data ? JSON.stringify(data) : text}`
+      );
     }
 
-    tokenCache.value = data.access_token;
-    tokenCache.expiresAt = Date.now() + (10 * 60 * 1000);
-
-    return tokenCache.value;
+    throw new Error("No access token received after retries");
   })();
 
   try {
@@ -359,55 +384,43 @@ async function guestyFetchSafe(url) {
 // ---------------------------------------------------
 
 async function getAvailableUnits({ checkin, checkout, occupancy, requestedCategory }) {
-  const liveResults = [];
+  const allRelevantListingIds = new Set(getAllListingIds());
 
-  for (const [unitKey, listingId] of Object.entries(LISTING_IDS.units)) {
-  if (!listingId) continue;
-
-  const categoryKey = mapUnitKeyToCategory(unitKey);
-  if (!categoryKey) continue;
-
-  const categoryMeta = CATEGORY_META[categoryKey];
-  if (!categoryMeta) continue;
-
-  if (requestedCategory && categoryKey !== requestedCategory) continue;
-  if (occupancy > categoryMeta.capacityMax) continue;
-
- const url = buildUrl(LISTINGS_URL, {
-  available: "true",
-  checkin,
-  checkout,
-});
-
-  // 👉 WICHTIG: kleine Pause zwischen Requests
-  await sleep(800);
+  // Nur EIN Guesty-Request für die Verfügbarkeit
+  const url = buildUrl(LISTINGS_URL, {
+    available: "true",
+    checkin,
+    checkout,
+  });
 
   const result = await guestyFetchSafe(url);
 
   if (!result.ok) {
-    console.log(`[availability] ${unitKey} failed: ${result.error}`);
-    continue;
+    throw new Error(result.error);
   }
 
   const items = parseArrayResponse(result.data);
+  const filtered = [];
 
- const match = items.find(item => String(item._id) === String(listingId));
-if (!match) continue;
+  for (const item of items) {
+    const rawId = String(item?._id || item?.id || item?.listingId || "");
+    if (!allRelevantListingIds.has(rawId)) continue;
 
-const normalized = normalizeListing(
-  match,
-  "unit-availability",
-  categoryKey
-);
+    const categoryKey = inferCategoryKeyFromListing(item);
+    if (!categoryKey) continue;
 
-  liveResults.push({
-    ...normalized,
-    unitKey,
-    listingId,
-  });
-}
+    const categoryMeta = CATEGORY_META[categoryKey];
+    if (!categoryMeta) continue;
 
-  return liveResults;
+    if (requestedCategory && categoryKey !== requestedCategory) continue;
+    if (occupancy > categoryMeta.capacityMax) continue;
+
+    filtered.push(
+      normalizeListing(item, "unit-availability", categoryKey)
+    );
+  }
+
+  return filtered;
 }
 
 // ---------------------------------------------------
@@ -491,6 +504,7 @@ app.get("/api/test-token", async (_req, res) => {
       ok: true,
       tokenReceived: Boolean(token),
       tokenPreview: `${token.slice(0, 12)}...`,
+      cachedUntil: tokenCache.expiresAt,
     });
   } catch (e) {
     res.status(400).json({
