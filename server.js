@@ -377,7 +377,6 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
     available: "true",
     checkin,
     checkout,
-    minOccupancy: occupancy,
     listingId,
   });
 
