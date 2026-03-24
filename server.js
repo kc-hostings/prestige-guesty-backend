@@ -373,12 +373,10 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
   if (requestedCategory && categoryKey !== requestedCategory) continue;
   if (occupancy > categoryMeta.capacityMax) continue;
 
-  const url = buildUrl(LISTINGS_URL, {
-    available: "true",
-    checkin,
-    checkout,
-    listingId,
-  });
+ const url = buildUrl(`${LISTINGS_URL}/${listingId}`, {
+  checkin,
+  checkout,
+});
 
   // 👉 WICHTIG: kleine Pause zwischen Requests
   await sleep(800);
