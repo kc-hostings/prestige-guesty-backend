@@ -384,48 +384,47 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
   const liveResults = [];
 
   for (const [unitKey, listingId] of Object.entries(LISTING_IDS.units)) {
-    if (!listingId) continue;
+  if (!listingId) continue;
 
-    const categoryKey = mapUnitKeyToCategory(unitKey);
-    if (!categoryKey) continue;
+  const categoryKey = mapUnitKeyToCategory(unitKey);
+  if (!categoryKey) continue;
 
-    const categoryMeta = CATEGORY_META[categoryKey];
-    if (!categoryMeta) continue;
+  const categoryMeta = CATEGORY_META[categoryKey];
+  if (!categoryMeta) continue;
 
-    if (requestedCategory && categoryKey !== requestedCategory) continue;
-    if (occupancy > categoryMeta.capacityMax) continue;
+  if (requestedCategory && categoryKey !== requestedCategory) continue;
+  if (occupancy > categoryMeta.capacityMax) continue;
 
-    const url = buildUrl(LISTINGS_URL, {
-      available: "true",
-      checkin,
-      checkout,
-      minOccupancy: occupancy,
-      listingId,
-    });
+  const url = buildUrl(LISTINGS_URL, {
+    available: "true",
+    checkin,
+    checkout,
+    minOccupancy: occupancy,
+    listingId,
+  });
 
-    const result = await guestyFetchSafe(url);
+  // 👉 WICHTIG: kleine Pause zwischen Requests
+  await sleep(800);
 
-    if (!result.ok) {
-      console.log(`[availability] ${unitKey} (${listingId}) failed: ${result.error}`);
-      continue;
-    }
+  const result = await guestyFetchSafe(url);
 
-    const items = parseArrayResponse(result.data);
-
-    console.log(
-      `[availability] ${unitKey} (${listingId}) -> ${items.length} result(s)`
-    );
-
-    if (!items.length) continue;
-
-    const normalized = normalizeListing(items[0], "unit-availability", categoryKey);
-
-    liveResults.push({
-      ...normalized,
-      unitKey,
-      listingId,
-    });
+  if (!result.ok) {
+    console.log(`[availability] ${unitKey} failed: ${result.error}`);
+    continue;
   }
+
+  const items = parseArrayResponse(result.data);
+
+  if (!items.length) continue;
+
+  const normalized = normalizeListing(items[0], "unit-availability", categoryKey);
+
+  liveResults.push({
+    ...normalized,
+    unitKey,
+    listingId,
+  });
+}
 
   return liveResults;
 }
