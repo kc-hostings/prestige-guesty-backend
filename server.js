@@ -373,7 +373,8 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
   if (requestedCategory && categoryKey !== requestedCategory) continue;
   if (occupancy > categoryMeta.capacityMax) continue;
 
- const url = buildUrl(`${LISTINGS_URL}/${listingId}`, {
+ const url = buildUrl(LISTINGS_URL, {
+  available: "true",
   checkin,
   checkout,
 });
@@ -390,7 +391,14 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
 
   const items = parseArrayResponse(result.data);
 
-  if (!items.length) continue;
+ const match = items.find(item => String(item._id) === String(listingId));
+if (!match) continue;
+
+const normalized = normalizeListing(
+  match,
+  "unit-availability",
+  categoryKey
+);
 
   const normalized = normalizeListing(items[0], "unit-availability", categoryKey);
 
