@@ -400,8 +400,6 @@ const normalized = normalizeListing(
   categoryKey
 );
 
-  const normalized = normalizeListing(items[0], "unit-availability", categoryKey);
-
   liveResults.push({
     ...normalized,
     unitKey,
