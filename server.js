@@ -112,16 +112,6 @@ function findListingIdByKey(key) {
   return null;
 }
 
-function findUnitKeyByListingId(listingId) {
-  if (!listingId) return null;
-
-  const entry = Object.entries(LISTING_IDS.units).find(
-    ([, value]) => String(value) === String(listingId)
-  );
-
-  return entry ? entry[0] : null;
-}
-
 function mapUnitKeyToCategory(unitKey) {
   if (!unitKey) return null;
   if (unitKey.startsWith("deluxe")) return "deluxe";
@@ -476,7 +466,7 @@ app.use((req, _res, next) => {
 });
 
 // ---------------------------------------------------
-// DEBUG ROUTES
+// ROOT / INFO ROUTES
 // ---------------------------------------------------
 
 app.get("/", (_req, res) => {
@@ -500,6 +490,7 @@ app.get("/", (_req, res) => {
       "/api/availability",
       "/api/availability-search",
       "/api/category-suggestions",
+      "/api/debug-env",
     ],
   });
 });
@@ -523,6 +514,7 @@ app.get("/api/routes", (_req, res) => {
       "/api/availability",
       "/api/availability-search",
       "/api/category-suggestions",
+      "/api/debug-env",
     ],
   });
 });
@@ -802,9 +794,6 @@ async function handleAvailabilityRequest(req, res) {
         : requestedCategory,
     });
 
-    // -----------------------------------
-    // UNIT MODE (für Deluxe #2, #4 etc.)
-    // -----------------------------------
     if (requestedUnit) {
       const requestedListingId = String(LISTING_IDS.units[requestedUnit]);
       const requestedCategoryKey = mapUnitKeyToCategory(requestedUnit);
@@ -823,6 +812,7 @@ async function handleAvailabilityRequest(req, res) {
           listingId: requestedListingId,
           reason: `Maximale Belegung überschritten. Diese Unit ist für bis zu ${categoryMeta.capacityMax} Gäste ausgelegt.`,
           result: null,
+          bookingUrl: buildBookingUrl(requestedListingId),
         });
       }
 
@@ -846,9 +836,6 @@ async function handleAvailabilityRequest(req, res) {
       });
     }
 
-    // -----------------------------------
-    // CATEGORY MODE
-    // -----------------------------------
     const finalResults = uniqueByCategory(liveResults).sort(sortByCategory);
 
     res.json({
@@ -875,6 +862,10 @@ app.get("/api/availability", handleAvailabilityRequest);
 app.get("/api/availability-search", handleAvailabilityRequest);
 app.get("/api/category-suggestions", handleAvailabilityRequest);
 
+// ---------------------------------------------------
+// DEBUG ROUTE
+// ---------------------------------------------------
+
 app.get("/api/debug-env", (_req, res) => {
   const clientId = process.env.GUESTY_CLIENT_ID || "";
   const clientSecret = process.env.GUESTY_CLIENT_SECRET || "";
@@ -895,6 +886,7 @@ app.get("/api/debug-env", (_req, res) => {
     frontendOrigin: process.env.FRONTEND_ORIGIN || null,
   });
 });
+
 // ---------------------------------------------------
 // FALLBACK
 // ---------------------------------------------------
@@ -908,6 +900,11 @@ app.use((req, res) => {
     version: APP_VERSION,
   });
 });
+
+// ---------------------------------------------------
+// START
+// ---------------------------------------------------
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Guesty backend listening on http://0.0.0.0:${PORT}`);
   console.log(`APP_VERSION=${APP_VERSION}`);
