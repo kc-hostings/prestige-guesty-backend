@@ -327,16 +327,15 @@ async function getAccessToken() {
   }
 
   tokenPromise = (async () => {
-    const clientId = requireEnv("GUESTY_CLIENT_ID");
-    const clientSecret = requireEnv("GUESTY_CLIENT_SECRET");
+    const clientId = requireEnv("GUESTY_CLIENT_ID").trim();
+    const clientSecret = requireEnv("GUESTY_CLIENT_SECRET").trim();
 
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const body = new URLSearchParams({
-        grant_type: "client_credentials",
-        scope: "booking_engine:api",
-        client_id: clientId,
-        client_secret: clientSecret,
-      });
+      const body = new URLSearchParams();
+      body.append("grant_type", "client_credentials");
+      body.append("scope", "booking_engine:api");
+      body.append("client_id", clientId);
+      body.append("client_secret", clientSecret);
 
       const response = await fetch(TOKEN_URL, {
         method: "POST",
@@ -345,7 +344,7 @@ async function getAccessToken() {
           "content-type": "application/x-www-form-urlencoded",
           "cache-control": "no-cache,no-cache",
         },
-        body,
+        body: body.toString(),
       });
 
       const text = await response.text();
@@ -889,7 +888,12 @@ app.get("/api/debug-env", (_req, res) => {
     clientSecretLength: clientSecret.length,
     clientIdPreview: clientId ? `${clientId.slice(0, 6)}...${clientId.slice(-4)}` : null,
     clientSecretPreview: clientSecret ? `${clientSecret.slice(0, 4)}...${clientSecret.slice(-4)}` : null,
-    appVersion: process.env.APP_VERSION || null
+    clientIdStartsWithSpace: /^\s/.test(clientId),
+    clientIdEndsWithSpace: /\s$/.test(clientId),
+    clientSecretStartsWithSpace: /^\s/.test(clientSecret),
+    clientSecretEndsWithSpace: /\s$/.test(clientSecret),
+    appVersion: process.env.APP_VERSION || null,
+    frontendOrigin: process.env.FRONTEND_ORIGIN || null,
   });
 });
 // ---------------------------------------------------
@@ -905,4 +909,10 @@ app.use((req, res) => {
     version: APP_VERSION,
   });
 });
-
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Guesty backend listening on http://0.0.0.0:${PORT}`);
+  console.log(`APP_VERSION=${APP_VERSION}`);
+  console.log(`FRONTEND_ORIGIN=${FRONTEND_ORIGIN}`);
+  console.log(`GUESTY_CLIENT_ID exists: ${Boolean(process.env.GUESTY_CLIENT_ID)}`);
+  console.log(`GUESTY_CLIENT_SECRET exists: ${Boolean(process.env.GUESTY_CLIENT_SECRET)}`);
+});
