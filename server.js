@@ -106,9 +106,20 @@ function getAllListingIds() {
 }
 
 function findListingIdByKey(key) {
+  if (!key) return null;
   if (LISTING_IDS.multi[key]) return LISTING_IDS.multi[key];
   if (LISTING_IDS.units[key]) return LISTING_IDS.units[key];
   return null;
+}
+
+function findUnitKeyByListingId(listingId) {
+  if (!listingId) return null;
+
+  const entry = Object.entries(LISTING_IDS.units).find(
+    ([, value]) => String(value) === String(listingId)
+  );
+
+  return entry ? entry[0] : null;
 }
 
 function mapUnitKeyToCategory(unitKey) {
@@ -147,10 +158,14 @@ function normalizeText(value) {
 function inferCategoryKeyFromListing(listing) {
   const rawId = String(listing?._id || listing?.id || listing?.listingId || "");
 
-  const matchMulti = Object.entries(LISTING_IDS.multi).find(([, listingId]) => String(listingId) === rawId);
+  const matchMulti = Object.entries(LISTING_IDS.multi).find(
+    ([, listingId]) => String(listingId) === rawId
+  );
   if (matchMulti) return matchMulti[0];
 
-  const matchUnit = Object.entries(LISTING_IDS.units).find(([, listingId]) => String(listingId) === rawId);
+  const matchUnit = Object.entries(LISTING_IDS.units).find(
+    ([, listingId]) => String(listingId) === rawId
+  );
   if (matchUnit) return mapUnitKeyToCategory(matchUnit[0]);
 
   const title = normalizeText(
@@ -178,6 +193,33 @@ function inferCategoryKeyFromListing(listing) {
   return null;
 }
 
+function inferUnitKeyFromListing(listing) {
+  const rawId = String(listing?._id || listing?.id || listing?.listingId || "");
+
+  const matchUnit = Object.entries(LISTING_IDS.units).find(
+    ([, listingId]) => String(listingId) === rawId
+  );
+  if (matchUnit) return matchUnit[0];
+
+  const title = normalizeText(
+    listing?.title ||
+      listing?.name ||
+      listing?.nickname ||
+      listing?.publicDescription?.summary ||
+      ""
+  );
+
+  if (title.includes("apartment 2") || title.includes("#2")) return "deluxe2";
+  if (title.includes("apartment 3") || title.includes("#3")) return "standard3";
+  if (title.includes("apartment 4") || title.includes("#4")) return "deluxe4";
+  if (title.includes("apartment 5") || title.includes("#5")) return "superior5";
+  if (title.includes("apartment 6") || title.includes("#6")) return "premium6";
+  if (title.includes("apartment 7") || title.includes("#7")) return "superior7";
+  if (title.includes("apartment 8") || title.includes("#8")) return "maisonette8";
+
+  return null;
+}
+
 function normalizePicture(listing) {
   const picture = listing?.picture;
 
@@ -199,6 +241,11 @@ function normalizePicture(listing) {
   return null;
 }
 
+function buildBookingUrl(id) {
+  if (!BOOKING_BASE_URL || !id) return null;
+  return `${BOOKING_BASE_URL.replace(/\/$/, "")}/${id}`;
+}
+
 function normalizeListing(listing, sourceType = null, requestedKey = null) {
   const rawId = listing?._id || listing?.id || listing?.listingId;
   const id = rawId ? String(rawId) : null;
@@ -210,11 +257,13 @@ function normalizeListing(listing, sourceType = null, requestedKey = null) {
     listing?.publicDescription?.summary ||
     "Apartment";
 
+  const unitKey = inferUnitKeyFromListing(listing);
   const categoryKey = requestedKey || inferCategoryKeyFromListing(listing);
   const categoryMeta = categoryKey ? CATEGORY_META[categoryKey] || null : null;
 
   return {
     id,
+    unitKey: unitKey || null,
     title,
     picture: normalizePicture(listing),
     capacity:
@@ -228,10 +277,7 @@ function normalizeListing(listing, sourceType = null, requestedKey = null) {
     bathrooms: listing?.bathrooms ?? null,
     categoryKey: categoryKey || null,
     categoryTitle: categoryMeta?.title || null,
-    bookingUrl:
-      BOOKING_BASE_URL && id
-        ? `${BOOKING_BASE_URL.replace(/\/$/, "")}/${id}`
-        : null,
+    bookingUrl: buildBookingUrl(id),
     sourceType,
     raw: listing,
   };
@@ -272,12 +318,10 @@ function uniqueByCategory(listings) {
 async function getAccessToken() {
   const now = Date.now();
 
-  // Token 50 Minuten wiederverwenden
   if (tokenCache.value && tokenCache.expiresAt > now) {
     return tokenCache.value;
   }
 
-  // parallele Token-Requests verhindern
   if (tokenPromise) {
     return tokenPromise;
   }
@@ -315,11 +359,11 @@ async function getAccessToken() {
 
       if (response.ok && data?.access_token) {
         tokenCache.value = data.access_token;
-
-        // konservativ cachen, damit nicht dauernd neu geholt wird
-        const expiresInMs = Math.max(((data.expires_in || 3600) - 300) * 1000, 10 * 60 * 1000);
+        const expiresInMs = Math.max(
+          ((data.expires_in || 3600) - 300) * 1000,
+          10 * 60 * 1000
+        );
         tokenCache.expiresAt = Date.now() + expiresInMs;
-
         return tokenCache.value;
       }
 
@@ -386,7 +430,6 @@ async function guestyFetchSafe(url) {
 async function getAvailableUnits({ checkin, checkout, occupancy, requestedCategory }) {
   const allRelevantListingIds = new Set(getAllListingIds());
 
-  // Nur EIN Guesty-Request für die Verfügbarkeit
   const url = buildUrl(LISTINGS_URL, {
     available: "true",
     checkin,
@@ -406,6 +449,7 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
     const rawId = String(item?._id || item?.id || item?.listingId || "");
     if (!allRelevantListingIds.has(rawId)) continue;
 
+    const unitKey = inferUnitKeyFromListing(item);
     const categoryKey = inferCategoryKeyFromListing(item);
     if (!categoryKey) continue;
 
@@ -415,9 +459,10 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
     if (requestedCategory && categoryKey !== requestedCategory) continue;
     if (occupancy > categoryMeta.capacityMax) continue;
 
-    filtered.push(
-      normalizeListing(item, "unit-availability", categoryKey)
-    );
+    filtered.push({
+      ...normalizeListing(item, "unit-availability", categoryKey),
+      unitKey,
+    });
   }
 
   return filtered;
@@ -723,6 +768,7 @@ async function handleAvailabilityRequest(req, res) {
       checkout,
       guests,
       category,
+      unit,
       location,
     } = req.query;
 
@@ -740,19 +786,76 @@ async function handleAvailabilityRequest(req, res) {
         : 1;
 
     const requestedCategory = category ? String(category).toLowerCase() : "";
+    const requestedUnit = unit ? String(unit).toLowerCase() : "";
+
+    if (requestedUnit && !LISTING_IDS.units[requestedUnit]) {
+      return res.status(404).json({
+        ok: false,
+        error: `Unknown unit key: ${requestedUnit}`,
+      });
+    }
 
     const liveResults = await getAvailableUnits({
       checkin,
       checkout,
       occupancy,
-      requestedCategory,
+      requestedCategory: requestedUnit
+        ? mapUnitKeyToCategory(requestedUnit)
+        : requestedCategory,
     });
 
+    // -----------------------------------
+    // UNIT MODE (für Deluxe #2, #4 etc.)
+    // -----------------------------------
+    if (requestedUnit) {
+      const requestedListingId = String(LISTING_IDS.units[requestedUnit]);
+      const requestedCategoryKey = mapUnitKeyToCategory(requestedUnit);
+      const categoryMeta = CATEGORY_META[requestedCategoryKey] || null;
+
+      if (categoryMeta && occupancy > categoryMeta.capacityMax) {
+        return res.json({
+          ok: true,
+          mode: "unit-availability",
+          available: false,
+          location: location || "reutlingen",
+          checkin,
+          checkout,
+          guests: occupancy,
+          unit: requestedUnit,
+          listingId: requestedListingId,
+          reason: `Maximale Belegung überschritten. Diese Unit ist für bis zu ${categoryMeta.capacityMax} Gäste ausgelegt.`,
+          result: null,
+        });
+      }
+
+      const matchedUnit = liveResults.find(
+        (item) => String(item.id) === requestedListingId || item.unitKey === requestedUnit
+      );
+
+      return res.json({
+        ok: true,
+        mode: "unit-availability",
+        available: Boolean(matchedUnit),
+        location: location || "reutlingen",
+        checkin,
+        checkout,
+        guests: occupancy,
+        unit: requestedUnit,
+        listingId: requestedListingId,
+        bookingUrl: matchedUnit?.bookingUrl || buildBookingUrl(requestedListingId),
+        result: matchedUnit || null,
+        reason: matchedUnit ? null : "Dieser Zeitraum ist für das gewünschte Apartment aktuell nicht verfügbar.",
+      });
+    }
+
+    // -----------------------------------
+    // CATEGORY MODE
+    // -----------------------------------
     const finalResults = uniqueByCategory(liveResults).sort(sortByCategory);
 
     res.json({
       ok: true,
-      mode: "unit-availability",
+      mode: "category-availability",
       location: location || "reutlingen",
       checkin,
       checkout,
@@ -791,4 +894,19 @@ app.use((req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Guesty backend listening on http://0.0.0.0:${PORT}`);
   console.log(`APP_VERSION=${APP_VERSION}`);
+});
+app.get("/api/debug-env", (_req, res) => {
+  const clientId = process.env.GUESTY_CLIENT_ID || "";
+  const clientSecret = process.env.GUESTY_CLIENT_SECRET || "";
+
+  res.json({
+    ok: true,
+    clientIdExists: Boolean(clientId),
+    clientSecretExists: Boolean(clientSecret),
+    clientIdLength: clientId.length,
+    clientSecretLength: clientSecret.length,
+    clientIdPreview: clientId ? `${clientId.slice(0, 6)}...${clientId.slice(-4)}` : null,
+    clientSecretPreview: clientSecret ? `${clientSecret.slice(0, 4)}...${clientSecret.slice(-4)}` : null,
+    appVersion: process.env.APP_VERSION || null
+  });
 });
