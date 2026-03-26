@@ -430,9 +430,8 @@ async function getAvailableUnits({ checkin, checkout, occupancy, requestedCatego
   const allRelevantListingIds = new Set(getAllListingIds());
 
   const url = buildUrl(LISTINGS_URL, {
-    available: "true",
-    checkin,
-    checkout,
+    checkIn: checkin,
+    checkOut: checkout,
   });
 
   const result = await guestyFetchSafe(url);
