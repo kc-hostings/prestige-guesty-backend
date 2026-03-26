@@ -877,24 +877,6 @@ app.get("/api/availability", handleAvailabilityRequest);
 app.get("/api/availability-search", handleAvailabilityRequest);
 app.get("/api/category-suggestions", handleAvailabilityRequest);
 
-// ---------------------------------------------------
-// FALLBACK
-// ---------------------------------------------------
-
-app.use((req, res) => {
-  res.status(404).json({
-    ok: false,
-    error: "Route not found",
-    method: req.method,
-    path: req.originalUrl,
-    version: APP_VERSION,
-  });
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Guesty backend listening on http://0.0.0.0:${PORT}`);
-  console.log(`APP_VERSION=${APP_VERSION}`);
-});
 app.get("/api/debug-env", (_req, res) => {
   const clientId = process.env.GUESTY_CLIENT_ID || "";
   const clientSecret = process.env.GUESTY_CLIENT_SECRET || "";
@@ -910,3 +892,17 @@ app.get("/api/debug-env", (_req, res) => {
     appVersion: process.env.APP_VERSION || null
   });
 });
+// ---------------------------------------------------
+// FALLBACK
+// ---------------------------------------------------
+
+app.use((req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: "Route not found",
+    method: req.method,
+    path: req.originalUrl,
+    version: APP_VERSION,
+  });
+});
+
