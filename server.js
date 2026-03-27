@@ -24,8 +24,13 @@ const APP_VERSION = process.env.APP_VERSION || "local-dev";
 
 const TOKEN_URL = "https://booking.guesty.com/oauth2/token";
 const API_BASE_URL = "https://booking.guesty.com/api";
+const OPEN_API_BASE_URL = "https://open-api.guesty.com/v1";
+
 const LISTINGS_URL = `${API_BASE_URL}/listings`;
 const CITIES_URL = `${LISTINGS_URL}/cities`;
+const OPEN_API_CALENDAR_URL = `${OPEN_API_BASE_URL}/availability-pricing/api/calendar/listings`;
+const QUOTE_URL = `${API_BASE_URL}/reservations/quotes`;
+
 const BOOKING_BASE_URL = process.env.GUESTY_BOOKING_BASE_URL || "";
 
 const LISTING_IDS = {
@@ -301,6 +306,61 @@ function uniqueByCategory(listings) {
   return result;
 }
 
+function resolveListingIdForCalendar({ unit, category }) {
+  if (unit && LISTING_IDS.units[unit]) {
+    return String(LISTING_IDS.units[unit]);
+  }
+
+  if (category && LISTING_IDS.multi[category]) {
+    return String(LISTING_IDS.multi[category]);
+  }
+
+  return null;
+}
+
+function normalizeCalendarDay(day) {
+  const date =
+    day?.date ||
+    day?._id ||
+    day?.day ||
+    day?.calendarDate ||
+    null;
+
+  const blocks = day?.blocks || {};
+  const unavailable =
+    Boolean(day?.available === false) ||
+    Boolean(day?.isAvailable === false) ||
+    Boolean(blocks?.r) ||
+    Boolean(blocks?.b) ||
+    Boolean(blocks?.m) ||
+    Boolean(blocks?.bd) ||
+    Boolean(blocks?.sr) ||
+    Boolean(blocks?.abl) ||
+    Boolean(blocks?.a) ||
+    Boolean(blocks?.bw) ||
+    Boolean(blocks?.o) ||
+    Boolean(blocks?.pt) ||
+    Boolean(blocks?.ic) ||
+    Boolean(blocks?.an);
+
+  const nightlyPrice =
+    day?.price ??
+    day?.nightlyRate ??
+    day?.nightPrice ??
+    day?.rate ??
+    day?.baseRate ??
+    null;
+
+  return {
+    date,
+    available: !unavailable,
+    unavailable,
+    price: nightlyPrice,
+    blocks,
+    raw: day,
+  };
+}
+
 // ---------------------------------------------------
 // TOKEN / FETCH
 // ---------------------------------------------------
@@ -412,6 +472,68 @@ async function guestyFetchSafe(url) {
   }
 }
 
+async function guestyOpenApiFetch(url) {
+  const token = await getAccessToken();
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${token}`,
+    },
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Guesty Open API request failed: ${response.status} ${text}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ok: true, raw: text };
+  }
+}
+
+async function guestyOpenApiFetchSafe(url) {
+  try {
+    const data = await guestyOpenApiFetch(url);
+    return { ok: true, data };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || "Unknown Guesty Open API error",
+    };
+  }
+}
+
+async function guestyBookingApiPost(url, payload) {
+  const token = await getAccessToken();
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Guesty Booking API POST failed: ${response.status} ${text}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ok: true, raw: text };
+  }
+}
+
 // ---------------------------------------------------
 // AVAILABILITY HELPERS
 // ---------------------------------------------------
@@ -490,6 +612,8 @@ app.get("/", (_req, res) => {
       "/api/availability",
       "/api/availability-search",
       "/api/category-suggestions",
+      "/api/calendar",
+      "/api/quote",
       "/api/debug-env",
     ],
   });
@@ -514,6 +638,8 @@ app.get("/api/routes", (_req, res) => {
       "/api/availability",
       "/api/availability-search",
       "/api/category-suggestions",
+      "/api/calendar",
+      "/api/quote",
       "/api/debug-env",
     ],
   });
@@ -861,6 +987,146 @@ async function handleAvailabilityRequest(req, res) {
 app.get("/api/availability", handleAvailabilityRequest);
 app.get("/api/availability-search", handleAvailabilityRequest);
 app.get("/api/category-suggestions", handleAvailabilityRequest);
+
+// ---------------------------------------------------
+// CALENDAR ROUTE
+// ---------------------------------------------------
+
+app.get("/api/calendar", async (req, res) => {
+  try {
+    const { unit, category, startDate, endDate, includeAllotment } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        ok: false,
+        error: "startDate and endDate are required",
+      });
+    }
+
+    const listingId = resolveListingIdForCalendar({
+      unit: unit ? String(unit).toLowerCase() : "",
+      category: category ? String(category).toLowerCase() : "",
+    });
+
+    if (!listingId) {
+      return res.status(404).json({
+        ok: false,
+        error: "Unknown or missing unit/category for calendar route",
+      });
+    }
+
+    const url = buildUrl(`${OPEN_API_CALENDAR_URL}/${listingId}`, {
+      startDate,
+      endDate,
+      includeAllotment: includeAllotment ?? "true",
+    });
+
+    const result = await guestyOpenApiFetchSafe(url);
+
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
+
+    const rawDays = Array.isArray(result.data)
+      ? result.data
+      : Array.isArray(result.data?.days)
+      ? result.data.days
+      : Array.isArray(result.data?.results)
+      ? result.data.results
+      : [];
+
+    const days = rawDays
+      .map(normalizeCalendarDay)
+      .filter((d) => d.date);
+
+    res.json({
+      ok: true,
+      listingId,
+      unit: unit || null,
+      category: category || null,
+      startDate,
+      endDate,
+      count: days.length,
+      days,
+      raw: result.data,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// ---------------------------------------------------
+// QUOTE ROUTE
+// ---------------------------------------------------
+
+app.post("/api/quote", async (req, res) => {
+  try {
+    const {
+      unit,
+      category,
+      checkin,
+      checkout,
+      guests,
+      adults,
+      children,
+      infants,
+    } = req.body || {};
+
+    if (!checkin || !checkout) {
+      return res.status(400).json({
+        ok: false,
+        error: "checkin and checkout are required",
+      });
+    }
+
+    const listingId = resolveListingIdForCalendar({
+      unit: unit ? String(unit).toLowerCase() : "",
+      category: category ? String(category).toLowerCase() : "",
+    });
+
+    if (!listingId) {
+      return res.status(404).json({
+        ok: false,
+        error: "Unknown or missing unit/category for quote route",
+      });
+    }
+
+    const totalGuests = Number(guests || adults || 1);
+
+    const payload = {
+      listingId,
+      checkInDateLocalized: checkin,
+      checkOutDateLocalized: checkout,
+      guestsCount: {
+        numberOfGuests: totalGuests,
+        adults: Number(adults || totalGuests),
+        children: Number(children || 0),
+        infants: Number(infants || 0),
+      },
+    };
+
+    const data = await guestyBookingApiPost(QUOTE_URL, payload);
+
+    res.json({
+      ok: true,
+      listingId,
+      unit: unit || null,
+      category: category || null,
+      checkin,
+      checkout,
+      guests: totalGuests,
+      data,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
 
 // ---------------------------------------------------
 // DEBUG ROUTE
