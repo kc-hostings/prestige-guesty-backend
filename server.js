@@ -368,10 +368,12 @@ function normalizeCalendarDay(day) {
 async function getAccessToken() {
   const now = Date.now();
 
+  // ✅ Token noch gültig → direkt zurück
   if (tokenCache.value && tokenCache.expiresAt > now) {
     return tokenCache.value;
   }
 
+  // ✅ Falls bereits ein Request läuft → warten!
   if (tokenPromise) {
     return tokenPromise;
   }
@@ -380,53 +382,46 @@ async function getAccessToken() {
     const clientId = requireEnv("GUESTY_CLIENT_ID").trim();
     const clientSecret = requireEnv("GUESTY_CLIENT_SECRET").trim();
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const body = new URLSearchParams();
-      body.append("grant_type", "client_credentials");
-      body.append("scope", "booking_engine:api");
-      body.append("client_id", clientId);
-      body.append("client_secret", clientSecret);
+    const body = new URLSearchParams();
+    body.append("grant_type", "client_credentials");
+    body.append("scope", "booking_engine:api");
+    body.append("client_id", clientId);
+    body.append("client_secret", clientSecret);
 
-      const response = await fetch(TOKEN_URL, {
-        method: "POST",
-        headers: {
-          accept: "application/json",
-          "content-type": "application/x-www-form-urlencoded",
-          "cache-control": "no-cache,no-cache",
-        },
-        body: body.toString(),
-      });
+    const response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+    });
 
-      const text = await response.text();
+    const text = await response.text();
 
-      let data = null;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = null;
-      }
-
-      if (response.ok && data?.access_token) {
-        tokenCache.value = data.access_token;
-        const expiresInMs = Math.max(
-          ((data.expires_in || 3600) - 300) * 1000,
-          10 * 60 * 1000
-        );
-        tokenCache.expiresAt = Date.now() + expiresInMs;
-        return tokenCache.value;
-      }
-
-      if (response.status === 429 && attempt < 3) {
-        await sleep(attempt * 3000);
-        continue;
-      }
-
-      throw new Error(
-        `No access token received: ${data ? JSON.stringify(data) : text}`
-      );
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
     }
 
-    throw new Error("No access token received after retries");
+    if (!response.ok || !data?.access_token) {
+      console.error("❌ TOKEN ERROR:", text);
+      throw new Error("Token request failed");
+    }
+
+    // ✅ Token speichern (mit großzügigem Buffer)
+    tokenCache.value = data.access_token;
+
+    const expiresIn = data.expires_in || 3600;
+
+    // 👉 WICHTIG: NICHT -300 Sekunden → das war dein Bug
+    tokenCache.expiresAt = Date.now() + (expiresIn - 60) * 1000;
+
+    console.log("✅ New Guesty token cached");
+
+    return tokenCache.value;
   })();
 
   try {
